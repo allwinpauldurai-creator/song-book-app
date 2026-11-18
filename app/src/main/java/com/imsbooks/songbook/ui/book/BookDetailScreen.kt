@@ -116,6 +116,27 @@ class BookDetailViewModel(private val c: AppContainer, private val bookId: Strin
     }
 
     fun messageShown() = _state.update { it.copy(message = null) }
+
+    /** Keeps the book in the app for offline reading (Downloads tab). Runs on, even if the screen closes. */
+    fun saveOffline(userId: String, book: BookDetail) {
+        c.applicationScope.launch {
+            try {
+                c.offline.download(userId, book.id, book.title, book.coverUrl)
+                _state.update { it.copy(message = "Downloaded. \"${book.title}\" now opens without a connection.") }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(message = "Download failed. ${eligibilityMessage(e)}") }
+            }
+        }
+    }
+
+    fun removeOffline() {
+        viewModelScope.launch {
+            c.offline.delete(bookId)
+            _state.update { it.copy(message = "Removed from this phone.") }
+        }
+    }
 }
 
 /** Maps the 403 eligibility codes of /read-access and /download-access to friendly text. */
@@ -147,6 +168,8 @@ fun BookDetailScreen(
     val session by appContainer().session.state.collectAsStateWithLifecycle()
     val resolver = LocalContext.current.contentResolver
     val snackbar = remember { SnackbarHostState() }
+    val offlineBooks by appContainer().offline.books.collectAsStateWithLifecycle()
+    val offlineProgress by appContainer().offline.downloading.collectAsStateWithLifecycle()
 
     val saveLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         if (uri != null) vm.download(uri, resolver)
@@ -211,14 +234,18 @@ fun BookDetailScreen(
                                 Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                                 Text("Read")
                             }
-                            OutlinedButton(
+                            OfflineButton(
+                                saved = offlineBooks.firstOrNull { it.bookId == book.id },
+                                progress = offlineProgress[book.id],
+                                onDownload = { vm.saveOffline(s.user.id, book) },
+                                onRemove = vm::removeOffline,
+                            )
+                            TextButton(
                                 onClick = { saveLauncher.launch(safeFileName(book.title)) },
                                 enabled = state.downloadProgress == null,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                Icon(DownloadIcon, contentDescription = null, Modifier.size(ButtonDefaults.IconSize))
-                                Spacer(Modifier.size(ButtonDefaults.IconSpacing))
-                                Text(if (state.downloadProgress == null) "Download PDF" else "Downloading…")
+                                Text(if (state.downloadProgress == null) "Save a copy of the PDF to Files" else "Saving the PDF…")
                             }
                             state.downloadProgress?.let { p ->
                                 if (p < 0) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -227,6 +254,11 @@ fun BookDetailScreen(
                         }
                     }
                     SessionState.Loading -> LoadingBox()
+                    SessionState.Offline -> if (offlineBooks.any { it.bookId == book.id }) {
+                        Button(onClick = { onRead(book.id) }, modifier = Modifier.fillMaxWidth()) { Text("Read offline") }
+                    } else {
+                        Notice("You are offline. Connect to the internet to read or download this book.")
+                    }
                     else -> {
                         Button(onClick = { onLogin(book.id) }, modifier = Modifier.fillMaxWidth()) {
                             Icon(Icons.Filled.Lock, contentDescription = null, Modifier.size(ButtonDefaults.IconSize))
@@ -246,6 +278,42 @@ fun BookDetailScreen(
                 )
                 if (session is SessionState.SignedIn) {
                     TextButton(onClick = { onSuggestCorrection(book.id, book.title) }) { Text("Suggest a correction") }
+                }
+            }
+        }
+    }
+}
+
+/** "Download for offline" / progress / "Downloaded" with remove and update. */
+@Composable
+private fun OfflineButton(
+    saved: com.imsbooks.songbook.data.OfflineBook?,
+    progress: Float?,
+    onDownload: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        when {
+            progress != null -> {
+                OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (progress < 0) "Downloading…" else "Downloading… ${(progress * 100).toInt()}%")
+                }
+                if (progress < 0) LinearProgressIndicator(Modifier.fillMaxWidth())
+                else LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            }
+            saved == null -> OutlinedButton(onClick = onDownload, modifier = Modifier.fillMaxWidth()) {
+                Icon(DownloadIcon, contentDescription = null, Modifier.size(ButtonDefaults.IconSize))
+                Spacer(Modifier.size(ButtonDefaults.IconSpacing))
+                Text("Download for offline")
+            }
+            else -> {
+                Notice(
+                    if (saved.updateAvailable) "Downloaded (version ${saved.versionNumber}). A newer version is available."
+                    else "Downloaded on this phone. It opens without a connection.",
+                )
+                androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (saved.updateAvailable) OutlinedButton(onClick = onDownload) { Text("Update download") }
+                    TextButton(onClick = onRemove) { Text("Remove download") }
                 }
             }
         }

@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -32,7 +33,10 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -108,6 +112,7 @@ class MeViewModel(private val c: AppContainer) : ViewModel() {
             // Revokes the refresh-token family on the server; the local session is dropped regardless.
             runCatching { c.api.logout() }
             c.pdfRepository.clearCache()
+            c.offline.deleteAll()
             c.session.clearLocal()
         }
     }
@@ -127,6 +132,7 @@ fun MeScreen(
     onRead: (String) -> Unit,
     onProfile: () -> Unit,
     onRequests: () -> Unit,
+    onDownloads: () -> Unit,
 ) {
     val container = appContainer()
     val session by container.session.state.collectAsStateWithLifecycle()
@@ -134,12 +140,18 @@ fun MeScreen(
 
     when (val s = session) {
         SessionState.Loading -> LoadingBox(Modifier.fillMaxSize())
-        SessionState.Offline -> Scaffold(topBar = { TopAppBar(title = { Text("My library") }) }) { p ->
-            ErrorState(
-                "Cannot reach the server to resume your session. Check your connection.",
-                Modifier.padding(p),
-                onRetry = { scope.launch { container.session.restore(container.api) } },
-            )
+        SessionState.Offline -> Scaffold(
+            topBar = {
+                TopAppBar(title = { Text(container.session.cachedUser?.let { "Hello, ${it.fullName.substringBefore(' ')}" } ?: "My library") })
+            },
+        ) { p ->
+            Column(Modifier.padding(p).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ErrorState(
+                    "You are offline, so your account cannot be loaded. Downloaded books still open.",
+                    onRetry = { scope.launch { container.session.restore(container.api) } },
+                )
+                OutlinedButton(onClick = onDownloads, modifier = Modifier.fillMaxWidth()) { Text("Open downloads") }
+            }
         }
         SessionState.SignedOut -> Scaffold(topBar = { TopAppBar(title = { Text("My library") }) }) { p ->
             Column(
@@ -167,10 +179,22 @@ private fun SignedInDashboard(
 ) {
     val vm = appViewModel { MeViewModel(it) }
     val state by vm.state.collectAsStateWithLifecycle()
+    val downloads by appContainer().offline.books.collectAsStateWithLifecycle()
+    var confirmLogout by rememberSaveable { mutableStateOf(false) }
     // The reader saves progress; always show the latest when coming back.
     LifecycleResumeEffect(Unit) {
         vm.refresh()
         onPauseOrDispose { }
+    }
+
+    if (confirmLogout) {
+        AlertDialog(
+            onDismissRequest = { confirmLogout = false },
+            title = { Text("Log out?") },
+            text = { Text("The ${downloads.size} book(s) downloaded on this phone will be removed.") },
+            confirmButton = { TextButton(onClick = { confirmLogout = false; vm.logout() }) { Text("Log out") } },
+            dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("Cancel") } },
+        )
     }
 
     Scaffold(
@@ -178,7 +202,7 @@ private fun SignedInDashboard(
             TopAppBar(
                 title = { Text("Hello, ${user.fullName.substringBefore(' ')}") },
                 actions = {
-                    IconButton(onClick = vm::logout) {
+                    IconButton(onClick = { if (downloads.isEmpty()) vm.logout() else confirmLogout = true }) {
                         Icon(Icons.AutoMirrored.Filled.ExitToApp, contentDescription = "Log out")
                     }
                 },

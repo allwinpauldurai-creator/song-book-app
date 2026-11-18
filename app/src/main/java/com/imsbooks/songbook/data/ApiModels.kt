@@ -46,6 +46,12 @@ data class Me(
 ) {
     val isAdmin: Boolean get() = "ADMIN" in roles
 
+    /** Publishers create books and manage the ones they uploaded (web: /admin/books, "My books"). */
+    val isPublisher: Boolean get() = "PUBLISHER" in roles
+
+    /** Sees the management area: admins everything, publishers only their books. */
+    val isStaff: Boolean get() = isAdmin || isPublisher
+
     /** Same rule as the backend eligibility check: admins bypass membership (decision D3). */
     val canRead: Boolean get() = isAdmin || membership?.valid == true
 }
@@ -115,6 +121,8 @@ data class HistoryItem(
 @Serializable
 data class ModificationRequest(
     val id: String,
+    val requestedBy: String? = null,
+    val requesterName: String? = null,
     val bookId: String? = null,
     val bookTitle: String? = null,
     val requestType: String,
@@ -123,6 +131,7 @@ data class ModificationRequest(
     val reviewNote: String? = null,
     val reviewedAt: String? = null,
     val createdAt: String,
+    val version: Long = 0,
 )
 
 // ---------------------------------------------------------------- request bodies

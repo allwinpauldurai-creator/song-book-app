@@ -1,66 +1,75 @@
 package com.imsbooks.songbook.data.session
 
 import android.content.Context
-import android.security.keystore.KeyGenParameterSpec
+import android.content.SharedPreferences
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import androidx.core.content.edit
 import java.security.KeyStore
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Small encrypted key-value store: values are AES-256-GCM encrypted with a non-exportable key held in
- * the Android Keystore, then kept in private SharedPreferences (excluded from backups). Used only for
- * the refresh token; the access token is never persisted (same rule as the web app, docs/SECURITY.md).
+ * Session storage: the refresh cookie and the last signed-in user, in the app's private
+ * SharedPreferences. Android's app sandbox (and file-based encryption on every supported device) keeps
+ * them away from other apps; they are excluded from cloud backup and device transfer
+ * (data_extraction_rules.xml), and the access token is never persisted (docs/SECURITY.md in the web repo).
+ *
+ * Earlier versions wrapped the values with an Android Keystore key. On some devices and PC emulators that key
+ * does not survive an app restart, so the session could not be read back and members had to log in every
+ * time. Values written by those versions are migrated once, when the key is still readable.
  */
 class SecureStore(context: Context) {
 
-    private val prefs = context.getSharedPreferences("songbook_secure", Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences = context.getSharedPreferences("songbook_session", Context.MODE_PRIVATE)
 
-    fun get(name: String): String? {
-        val stored = prefs.getString(name, null) ?: return null
-        return try {
-            val bytes = Base64.decode(stored, Base64.NO_WRAP)
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes, 0, IV_SIZE))
-            String(cipher.doFinal(bytes, IV_SIZE, bytes.size - IV_SIZE), Charsets.UTF_8)
+    init {
+        migrateFromKeystore(context)
+    }
+
+    fun get(name: String): String? = prefs.getString(name, null)
+
+    /** Written synchronously: a rotated refresh token must be on disk before the app can be killed. */
+    fun put(name: String, value: String) = prefs.edit(commit = true) { putString(name, value) }
+
+    fun remove(name: String) = prefs.edit(commit = true) { remove(name) }
+
+    // ------------------------------------------------------------------ one-time migration
+
+    private fun migrateFromKeystore(context: Context) {
+        val legacy = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
+        if (legacy.all.isEmpty()) return
+        prefs.edit(commit = true) {
+            for ((name, stored) in legacy.all) {
+                if (stored is String && prefs.getString(name, null) == null) decryptLegacy(stored)?.let { putString(name, it) }
+            }
+        }
+        legacy.edit(commit = true) { clear() }
+        try {
+            KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }.deleteEntry(LEGACY_KEY_ALIAS)
         } catch (_: Exception) {
-            // Key lost (e.g. device restore) or data corrupted: behave as signed out.
-            remove(name)
-            null
+            // Nothing left to clean up.
         }
     }
 
-    fun put(name: String, value: String) {
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, key())
-        val encrypted = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-        prefs.edit { putString(name, Base64.encodeToString(encrypted, Base64.NO_WRAP)) }
-    }
-
-    fun remove(name: String) = prefs.edit { remove(name) }
-
-    private fun key(): SecretKey {
+    private fun decryptLegacy(stored: String): String? = try {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        generator.init(
-            KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build(),
-        )
-        return generator.generateKey()
+        val key = keyStore.getKey(LEGACY_KEY_ALIAS, null) as? SecretKey ?: return null
+        val bytes = Base64.decode(stored, Base64.NO_WRAP)
+        val cipher = Cipher.getInstance("${KeyProperties.KEY_ALGORITHM_AES}/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, bytes, 0, 12))
+        String(cipher.doFinal(bytes, 12, bytes.size - 12), Charsets.UTF_8)
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not migrate a stored value (${e.javaClass.simpleName})")
+        null
     }
 
     private companion object {
+        const val TAG = "SecureStore"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
-        const val KEY_ALIAS = "songbook_session_key"
-        const val TRANSFORMATION = "AES/GCM/NoPadding"
-        const val IV_SIZE = 12
+        const val LEGACY_PREFS = "songbook_secure"
+        const val LEGACY_KEY_ALIAS = "songbook_session_key"
     }
 }

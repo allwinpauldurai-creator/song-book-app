@@ -1,5 +1,7 @@
 package com.imsbooks.songbook.data.session
 
+import com.imsbooks.songbook.data.Me
+import kotlinx.serialization.json.Json
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
@@ -57,6 +59,29 @@ class RefreshCookieJar(private val apiBase: HttpUrl, private val storage: Cookie
 
     companion object {
         const val REFRESH_COOKIE = "sb_refresh"
+    }
+}
+
+/** Where [SessionManager] keeps the last signed-in user (profile only, no credentials). */
+interface UserCache {
+    fun load(): Me?
+    fun save(user: Me)
+    fun clear()
+
+    object None : UserCache {
+        override fun load(): Me? = null
+        override fun save(user: Me) = Unit
+        override fun clear() = Unit
+    }
+}
+
+class SecureUserCache(private val store: SecureStore, private val json: Json) : UserCache {
+    override fun load(): Me? = store.get(KEY)?.let { runCatching { json.decodeFromString(Me.serializer(), it) }.getOrNull() }
+    override fun save(user: Me) = store.put(KEY, json.encodeToString(Me.serializer(), user))
+    override fun clear() = store.remove(KEY)
+
+    private companion object {
+        const val KEY = "last_user"
     }
 }
 

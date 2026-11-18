@@ -7,14 +7,24 @@ frontend:
 | Web route | Android screen |
 |---|---|
 | `/`, `/books` | **Books** tab: search, category chips, sort, infinite grid, pull to refresh |
-| `/books/:id` | Book detail: Read, Download PDF (system "Save as"), "Log in to read", membership notice, Suggest a correction |
+| `/books/:id` | Book detail: Read, **Download for offline**, save a copy of the PDF to Files, "Log in to read", membership notice, Suggest a correction |
+| (app only) | **Downloads** tab: books saved on the phone, readable without a connection |
 | `/login`, `/register`, `/forgot-password` | Mobile-number sign-in, registration (signed in at once), SMS-code password reset |
 | `/me` | **My library** tab: membership, account, Continue reading, reading history, log out |
 | `/me/profile` | Name/email, change mobile number (SMS code), change password (signs out everywhere) |
 | `/me/requests` | My requests + new request (type, optional book search, description) |
 | `/read/:id` | Reader: swipe/buttons/slider/go-to-page, pinch and double-tap zoom, progress saved and resumed |
+| `/admin` | **Manage** tab (admins): dashboard counts and menu |
+| `/admin/users`, `/admin/users/:id` | Search/filter users, add a user, edit account, roles (Publisher, Administrator), memberships |
+| `/admin/memberships` | All memberships by status; add (with user search) and edit |
+| `/admin/books`, `/admin/books/:id` | Books list; create (PDF + cover upload with progress), edit details, replace cover, upload a new PDF version, download any version, archive |
+| `/admin/categories` | Add, rename, show/hide |
+| `/admin/requests` | Review members' requests (approve/reject with a note) |
+| `/admin/audit` | Audit log with filters |
 
-The **admin console stays on the web**. Admins can still sign in on the phone and read every book.
+**Publishers** get the **Manage** tab too, which opens straight to **My books**: they create books and manage only
+the books they uploaded (the API returns 404 for anyone else's), the same as the web app. The tab only appears for
+admins and publishers, and every management screen re-checks the role; the API enforces all of it regardless.
 
 Stack: Kotlin, Jetpack Compose (Material 3), Navigation (type-safe routes), Retrofit + OkHttp +
 kotlinx.serialization, Coil 3 for covers, Android `PdfRenderer` for pages. minSdk 26 (Android 8), target/compile SDK 37.
@@ -22,8 +32,11 @@ kotlinx.serialization, Coil 3 for covers, Android `PdfRenderer` for pages. minSd
 ## How it uses the API
 
 - **Auth** follows the backend design (docs/SECURITY.md in the web repo). The 15-minute access token is held in
-  memory only. The `sb_refresh` HttpOnly cookie is kept by `RefreshCookieJar` and persisted with
-  AES-256-GCM using a non-exportable Android Keystore key, and it is excluded from backups and device transfer.
+  memory only. The `sb_refresh` HttpOnly cookie is kept by `RefreshCookieJar` and saved (synchronously, so a
+  rotated token is never lost) in the app's private storage, which the Android sandbox protects and which is
+  excluded from backups and device transfer. That keeps members signed in across app restarts for the 14-day
+  session. (The first version also wrapped it with an Android Keystore key; on some devices and PC emulators that
+  key does not survive a restart, which signed members out every time. Old values are migrated once.)
   A 401 triggers one *single-flight* refresh and a retry: the backend rotates refresh tokens and treats reuse
   as theft, so refreshes never overlap. A rejected refresh signs the user out.
   The backend accepts native clients as-is. Its refresh/logout Origin check only rejects a *wrong* `Origin`
@@ -32,18 +45,33 @@ kotlinx.serialization, Coil 3 for covers, Android `PdfRenderer` for pages. minSd
   so the current book is downloaded into the app's private cache. Only one book is kept; it is reused
   for the same version and deleted on log out. Eligibility is re-checked by the API every time a book is opened.
 - **Covers** are fetched from `/api/v1/books/{id}/cover?v=…` with the app's HTTP client.
+- **Offline downloads** (`OfflineLibrary`) use the download ticket (`/download-access`, audited as a download, like
+  the web's Download PDF) and live in the app's private files with their cover and last page read:
+  - They belong to the signed-in account. Logging out deletes them, and signing in as someone else deletes the
+    previous account's copies. An expired session keeps them hidden until the same member signs in again.
+  - Eligibility stays the server's decision. When online, the reader re-checks each open with `/read-access`
+    (a withdrawn book is deleted, a lapsed membership blocks reading), and the app re-checks all downloads on
+    sign-in. Offline, a copy opens for **30 days** after its last successful check
+    (`OfflineLibrary.OFFLINE_GRACE_DAYS`), then needs one connection.
+  - When a newer PDF version is published, the book page and reader offer "Update download".
+  - Reading progress is saved on the phone while offline and sent to the server when it can be reached.
+- **Uploads** (admin/publisher) stream the picked file from the Storage Access Framework, so a 100 MB PDF is never
+  loaded into memory, with the same size/type checks as the web form; the server still validates every file.
 
 ## Project layout
 
 ```
 app/src/main/java/com/imsbooks/songbook/
-  AppContainer.kt          manual DI: OkHttp, Retrofit, session, PDF repository
-  data/                    API models + Retrofit interface, errors, PdfRepository
-  data/session/            SessionManager (token, refresh, state), RefreshCookieJar, SecureStore (Keystore)
+  AppContainer.kt          manual DI: OkHttp, Retrofit, session, PDF repository, offline library
+  data/                    API models + Retrofit interfaces (SongBookApi, AdminApi), errors, PdfRepository,
+                           OfflineLibrary (downloads), Uploads (streamed multipart from a picked file)
+  data/session/            SessionManager (token, refresh, state), RefreshCookieJar, SecureStore (private storage)
   ui/                      SongBookApp (navigation + tabs), theme, components
-  ui/catalogue|book|auth|member|reader/   screens and their ViewModels
+  ui/catalogue|book|auth|member|reader|downloads/   member screens and their ViewModels
+  ui/admin/                management area: dashboard, users, memberships, books, categories, requests, audit
   util/                    mobile-number rules (same as backend/web), date formatting
-app/src/test/              unit tests: mobile rules, cookie jar + refresh/retry against MockWebServer
+app/src/test/              unit tests: mobile rules, cookie jar + refresh/retry, cookie restart, offline library
+app/src/androidTest/       on-device test: the session survives an app restart
 infra/releases.bicep       Azure storage for APK downloads
 .github/workflows/         CI + signed releases published to Azure
 ```

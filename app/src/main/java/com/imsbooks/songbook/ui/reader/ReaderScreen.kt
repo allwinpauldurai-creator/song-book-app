@@ -115,7 +115,10 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                         Text("Downloading book… ${(p * 100).roundToInt()}%", Modifier.padding(top = 16.dp))
                     }
                 }
-                else -> PdfPager(vm, state.pageCount, state.initialPage)
+                else -> Column(Modifier.fillMaxSize()) {
+                    state.notice?.let { com.imsbooks.songbook.ui.components.Notice(it, Modifier.padding(8.dp)) }
+                    PdfPager(vm, state.pageCount, state.initialPage)
+                }
             }
         }
     }
