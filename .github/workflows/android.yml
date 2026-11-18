@@ -1,0 +1,61 @@
+# CI and releases for the Android app.
+#   pull request / any push -> unit tests, lint, debug build
+#   push to dev             -> signed dev APK -> Azure (dev)
+#   push to main            -> dev, then prod (approval) when the repository variable PROD_ENABLED is 'true'
+# Mirrors Song-book-Webapp/.github/workflows/deploy.yml: same GitHub environments, same OIDC login.
+name: Android
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for azure/login (release jobs)
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Tests, lint, debug build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: chmod +x gradlew && ./gradlew --no-daemon :app:testLocalDebugUnitTest :app:lintDevRelease :app:assembleLocalDebug
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports
+          path: app/build/reports
+          retention-days: 14
+
+  release-dev:
+    name: Release to dev
+    needs: check
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/android-release.yml
+    with:
+      environment: dev
+      flavour: dev
+    secrets: inherit
+
+  release-prod:
+    name: Release to prod
+    needs: release-dev
+    # Repository variable (environment variables are not available in a job-level `if`).
+    if: github.ref == 'refs/heads/main' && vars.PROD_ENABLED == 'true'
+    uses: ./.github/workflows/android-release.yml
+    with:
+      environment: prod # requires approval (GitHub environment protection rule)
+      flavour: prod
+    secrets: inherit
