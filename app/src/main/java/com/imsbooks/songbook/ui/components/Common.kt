@@ -45,9 +45,10 @@ import com.imsbooks.songbook.util.Mobile
 
 /** Book cover (3:4) loaded from the API, with a lettered placeholder when there is none. */
 @Composable
-fun BookCover(url: String?, title: String, modifier: Modifier = Modifier) {
+fun BookCover(url: String?, title: String, modifier: Modifier = Modifier, localFile: java.io.File? = null) {
     val container = (LocalContext.current.applicationContext as SongBookApplication).container
-    val absolute = container.absoluteUrl(url)
+    // A downloaded book keeps its cover on the device, so it shows offline too.
+    val absolute: Any? = localFile?.takeIf { it.length() > 0 } ?: container.absoluteUrl(url)
     Box(
         modifier
             .aspectRatio(3f / 4f)

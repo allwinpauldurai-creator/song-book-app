@@ -1,15 +1,22 @@
 package com.imsbooks.songbook
 
 import android.content.Context
+import com.imsbooks.songbook.data.AdminApi
+import com.imsbooks.songbook.data.OfflineLibrary
 import com.imsbooks.songbook.data.PdfRepository
 import com.imsbooks.songbook.data.SongBookApi
 import com.imsbooks.songbook.data.session.RefreshCookieJar
 import com.imsbooks.songbook.data.session.SecureCookieStorage
 import com.imsbooks.songbook.data.session.SecureStore
+import com.imsbooks.songbook.data.session.SecureUserCache
 import com.imsbooks.songbook.data.session.SessionManager
+import com.imsbooks.songbook.data.session.SessionState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -30,9 +37,11 @@ class AppContainer(context: Context) {
         coerceInputValues = true
     }
 
-    private val cookieJar = RefreshCookieJar(apiBaseUrl.toHttpUrl(), SecureCookieStorage(SecureStore(context)))
+    private val secureStore = SecureStore(context)
 
-    val session = SessionManager(cookieJar)
+    private val cookieJar = RefreshCookieJar(apiBaseUrl.toHttpUrl(), SecureCookieStorage(secureStore))
+
+    val session = SessionManager(cookieJar, SecureUserCache(secureStore, json))
 
     private val baseClient: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(cookieJar)
@@ -52,7 +61,17 @@ class AppContainer(context: Context) {
         .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
         .build()
 
-    val api: SongBookApi = retrofit(httpClient).create(SongBookApi::class.java)
+    private val apiRetrofit = retrofit(httpClient)
+
+    val api: SongBookApi = apiRetrofit.create(SongBookApi::class.java)
+
+    /** Management area (admins; publishers for their own books). */
+    val adminApi: AdminApi = apiRetrofit.create(AdminApi::class.java)
+
+    /** Uploads can take minutes on a slow connection; everything else keeps the short timeouts. */
+    val uploadApi: AdminApi = retrofit(
+        httpClient.newBuilder().writeTimeout(10, TimeUnit.MINUTES).readTimeout(5, TimeUnit.MINUTES).build(),
+    ).create(AdminApi::class.java)
 
     init {
         session.refreshApi = retrofit(baseClient).create(SongBookApi::class.java)
@@ -61,7 +80,24 @@ class AppContainer(context: Context) {
     /** Outlives screens, e.g. to save reading progress when the reader closes. */
     val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val pdfRepository =PdfRepository(api, httpClient, json, apiBaseUrl, context.cacheDir)
+    val pdfRepository = PdfRepository(api, httpClient, json, apiBaseUrl, context.cacheDir)
+
+    val offline = OfflineLibrary(api, json, pdfRepository, httpClient, ::absoluteUrl, context.filesDir)
+
+    init {
+        // Downloads belong to one account, and are re-verified whenever the member is online.
+        applicationScope.launch {
+            session.state
+                .map { (it as? SessionState.SignedIn)?.user }
+                .distinctUntilChangedBy { it?.id to it?.canRead }
+                .collect { user ->
+                    if (user != null) {
+                        offline.onSignedIn(user)
+                        offline.revalidate(user)
+                    }
+                }
+        }
+    }
 
     /** Backend-relative paths such as "/api/v1/books/x/cover?v=..." become absolute URLs. */
     fun absoluteUrl(path: String?): String? = when {

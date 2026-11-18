@@ -28,10 +28,21 @@ sealed interface SessionState {
  * kept by [RefreshCookieJar]. Refreshing is single-flight (synchronized): the backend rotates the
  * refresh token on every use and treats a reused one as theft, so two refreshes must never overlap.
  */
-class SessionManager(private val cookieJar: RefreshCookieJar) {
+class SessionManager(
+    private val cookieJar: RefreshCookieJar,
+    private val userCache: UserCache = UserCache.None,
+) {
 
     /** Retrofit API on a client *without* the authenticator, used only to refresh. */
     lateinit var refreshApi: SongBookApi
+
+    /**
+     * The last signed-in user, kept with the session so the app can greet them and open their downloads
+     * when it starts without a network. Not used for any access decision (the server makes those).
+     */
+    @Volatile
+    var cachedUser: Me? = userCache.load()
+        private set
 
     @Volatile
     var accessToken: String? = null
@@ -78,7 +89,9 @@ class SessionManager(private val cookieJar: RefreshCookieJar) {
         _state.value = SessionState.Loading
         when (withContext(Dispatchers.IO) { refreshBlocking() }) {
             is RefreshResult.Ok -> try {
-                _state.value = SessionState.SignedIn(api.me())
+                val user = api.me()
+                remember(user)
+                _state.value = SessionState.SignedIn(user)
             } catch (_: Exception) {
                 _state.value = if (cookieJar.hasSession()) SessionState.Offline else SessionState.SignedOut
             }
@@ -89,11 +102,15 @@ class SessionManager(private val cookieJar: RefreshCookieJar) {
 
     fun signedIn(token: String, user: Me) {
         accessToken = token
+        remember(user)
         _state.value = SessionState.SignedIn(user)
     }
 
     fun userUpdated(user: Me) {
-        if (state.value is SessionState.SignedIn) _state.value = SessionState.SignedIn(user)
+        if (state.value is SessionState.SignedIn) {
+            remember(user)
+            _state.value = SessionState.SignedIn(user)
+        }
     }
 
     /** Drops the local session (after logout, a password change, or a failed refresh). */
@@ -101,8 +118,17 @@ class SessionManager(private val cookieJar: RefreshCookieJar) {
         synchronized(lock) {
             accessToken = null
             cookieJar.clear()
+            cachedUser = null
+            userCache.clear()
         }
         _state.value = SessionState.SignedOut
+    }
+
+    private fun remember(user: Me) {
+        if (cachedUser != user) {
+            cachedUser = user
+            userCache.save(user)
+        }
     }
 
     fun hasSavedSession(): Boolean = cookieJar.hasSession()

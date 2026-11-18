@@ -60,7 +60,8 @@ class PdfRepository(
         dir.listFiles()?.forEach { it.delete() }
     }
 
-    private suspend fun fetch(ticket: AccessTicket, out: OutputStream, onProgress: (Float) -> Unit) =
+    /** Streams the PDF behind a ticket into [out]; HTTP errors become [ApiException]. */
+    suspend fun fetch(ticket: AccessTicket, out: OutputStream, onProgress: (Float) -> Unit) =
         withContext(Dispatchers.IO) {
             val url = if (ticket.contentUrl.startsWith("http")) ticket.contentUrl else apiBaseUrl + ticket.contentUrl
             val call = http.newCall(Request.Builder().url(url).build())

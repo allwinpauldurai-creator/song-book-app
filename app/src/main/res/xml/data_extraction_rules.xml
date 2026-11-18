@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The session (refresh token) must not leave the device through backups or device transfer. -->
+<!-- The session (refresh token) and downloaded books must not leave the device through backups or device transfer. -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="." />
